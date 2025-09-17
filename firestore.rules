@@ -1,0 +1,160 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Look up the user's orgId from users/{uid}
+    function userOrgId() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.orgId;
+    }
+
+    // Ensure document belongs to the same org as the signed-in user
+    // Reads: resource; Creates/Updates: request.resource; Deletes: resource (request.resource is null)
+    function sameOrgRead() {
+      return isSignedIn() && resource.data.orgId == userOrgId();
+    }
+    function sameOrgMutate() {
+      return isSignedIn() && (
+        (request.resource != null && request.resource.data.orgId == userOrgId()) ||
+        (request.resource == null && resource.data.orgId == userOrgId())
+      );
+    }
+
+    function hasRole(roles) {
+      // Optional: if you add custom claims later (request.auth.token.role)
+      // you can check them here. For now, fall back to users/{uid}.role
+      return (
+        (request.auth.token.role in roles) ||
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in roles)
+      );
+    }
+
+    function isAdminOrStaff() {
+      return hasRole(['admin', 'staff', 'superadmin']);
+    }
+
+    function isAdmin() {
+      return hasRole(['admin', 'superadmin']);
+    }
+
+    // Basic type guards
+    function isString(v) { return v is string; }
+    function isBool(v) { return v is bool; }
+    function isNumber(v) { return v is int || v is float; }
+
+    // Minimal student doc validation
+    function validStudent(data) {
+      return isString(data.orgId)
+        && isString(data.name)
+        && isString(data.enrollNo)
+        && isString(data.dept)
+        && isString(data.year)
+        && isString(data.status)
+        && (data.status in ['active','alumni','suspended']);
+    }
+
+    // orgs
+    match /orgs/{orgId} {
+      allow read: if isSignedIn() && orgId == userOrgId();
+      allow write: if isSignedIn() && ((request.resource != null && request.resource.data.orgId == userOrgId()) || (request.resource == null && orgId == userOrgId())) && isAdminOrStaff();
+    }
+
+    // users
+    match /users/{uid} {
+      allow read: if isSignedIn() && (uid == request.auth.uid || isAdminOrStaff());
+      // Allow admins/staff to manage users in same org; allow user to upsert their own minimal fields if needed (restrict in v2)
+      allow write: if sameOrgMutate() && (isAdminOrStaff() || uid == request.auth.uid);
+    }
+
+    // students
+    match /students/{id} {
+      allow read: if sameOrgRead() && (isAdminOrStaff() || resource.data.userId == request.auth.uid);
+      allow create: if sameOrgMutate() && isAdminOrStaff() && validStudent(request.resource.data);
+      allow update: if sameOrgMutate() && isAdminOrStaff() && validStudent(request.resource.data);
+      allow delete: if sameOrgMutate() && isAdminOrStaff();
+    }
+
+    // fees
+    match /fees/{feeId} {
+      allow read: if sameOrgRead() && (isAdminOrStaff() || resource.data.studentId == request.auth.uid);
+      // Create fee: admin or staff
+      allow create: if sameOrgMutate() && isAdminOrStaff();
+      // Update fee: admin or staff, with payment fields restricted to admin
+      allow update: if sameOrgMutate() && (
+        (
+          (
+            ('status' in request.resource.data && request.resource.data.status != resource.data.status) ||
+            ('txnId' in request.resource.data) ||
+            ('paymentDate' in request.resource.data) ||
+            ('receiptUrl' in request.resource.data)
+          ) && isAdmin()
+        ) ||
+        (
+          !('status' in request.resource.data) &&
+          !('txnId' in request.resource.data) &&
+          !('paymentDate' in request.resource.data) &&
+          !('receiptUrl' in request.resource.data) &&
+          isAdminOrStaff()
+        )
+      );
+      allow delete: if sameOrgMutate() && isAdmin();
+    }
+
+    // hostel rooms
+    match /rooms/{roomId} {
+      allow read: if sameOrgRead();
+      allow create, update, delete: if sameOrgMutate() && isAdminOrStaff();
+    }
+
+    // hostel allocations
+    match /allocations/{allocId} {
+      allow read: if sameOrgRead() && (isAdminOrStaff() || resource.data.studentId == request.auth.uid);
+      allow create, update, delete: if sameOrgMutate() && isAdminOrStaff();
+    }
+
+    // exams
+    match /exams/{examId} {
+      allow read: if sameOrgRead();
+      allow create, update, delete: if sameOrgMutate() && isAdminOrStaff();
+    }
+
+    // results
+    match /results/{resultId} {
+      allow read: if sameOrgRead() && (isAdminOrStaff() || resource.data.studentId == request.auth.uid);
+      allow create, update, delete: if sameOrgMutate() && isAdminOrStaff();
+    }
+
+    // timetable
+    match /timetable/{slotId} {
+      allow read: if sameOrgRead();
+      allow create, update, delete: if sameOrgMutate() && isAdminOrStaff();
+    }
+
+    // notifications
+    match /notifications/{id} {
+      allow read: if sameOrgRead();
+      allow create, update, delete: if sameOrgMutate() && isAdminOrStaff();
+    }
+
+    // metrics (aggregates written by Functions)
+    match /metrics/{scope}/{id} {
+      allow read: if sameOrgRead();
+      allow write: if sameOrgMutate() && isAdminOrStaff();
+    }
+
+    // audit (read-only to admin/staff)
+    match /audit/{id} {
+      allow read: if sameOrgRead() && isAdminOrStaff();
+      allow write: if sameOrgMutate() && isAdminOrStaff();
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
+
